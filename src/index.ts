@@ -68,8 +68,8 @@ import type {
   PoolWebComboCandidate,
   PoolWebCombosStatus,
   PoolWebRelayPatch,
+  PoolWebRelayStatus,
 } from './status-paths.ts'
-import type { PoolRelayStatus as PoolWebRelayStatus } from './relay.ts'
 import { readBillionStatus } from './billion.ts'
 import { describeError, recordStartupNote } from './diagnostics.ts'
 import { probeModelConnectivity } from './model-probe.ts'
@@ -174,8 +174,9 @@ function combosStatusOf(
   }
 }
 import { WorkBuddyScheduler, type AutomationJobKind, type AutomationLedger, type AutomationOptions } from './scheduler.ts'
-import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
-import { createPoolRelay, newRelayKey, RELAY_DEFAULT_PORT, RELAY_HOSTS, type RelaySettings } from './relay.ts'
+import { channelListableAsRows, createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
+import { createChannelLane, type ChannelLaneLlm } from './channel-lane.ts'
+import { createPoolRelay, newRelayKey, relayDocumentOf, RELAY_DEFAULT_PORT, RELAY_HOSTS, type RelaySettings } from './relay.ts'
 import { UsageRecorder } from './stats.ts'
 import { buildStatus } from './status.ts'
 export {
@@ -1048,6 +1049,43 @@ function canonicalJson(value: unknown): string {
   // is the one thing a user reads as "the plugin is broken".
   const freeCatalog = new FreeCatalog()
   const freeLane = createFreeLaneSource(freeCatalog, ctx.logger, usageRecorder)
+  /**
+   * The login channels, for the LAN gateway.
+   *
+   * Reached through `ctx.llm` rather than a socket: the pack registers each
+   * channel as a host adapter, so the host is the only thing that knows the
+   * credential, the endpoint and the wire dialect.
+   *
+   * The two pool-owned ids are left out on purpose. `buddy` and `workbuddy` ARE
+   * account pools this plugin already serves, so listing them again as channels
+   * would offer the same models twice under two routes — and `buddy:` is already
+   * the prefix the pool lane's own rows carry.
+   */
+  const channelLane = createChannelLane({
+    llm: ctx.llm as unknown as ChannelLaneLlm,
+    providers: () => REGISTERED_CHANNELS
+      .map(channel => channel.id)
+      .filter(id => channelListableAsRows(id, POOL_OWNED_CHANNELS)),
+    toId: (channel, modelId) => `${channel}:${modelId}`,
+    // An OpenAI `image_url` cannot reach a channel model as a URL: the host's
+    // typed `ImageBlock` names a durable attachment, so the bytes go to the
+    // store first and the block carries the reference it hands back. Same service
+    // the pool's own image path uses (`adapter.ts` `resolveAttachments`).
+    attachments: () => ctx.get('attachments') as
+      | { saveImage: (input: { data: Uint8Array; mediaType: string; name?: string }) => Promise<unknown> }
+      | undefined,
+    logger: ctx.logger,
+  })
+  /**
+   * The gateway allowlist, re-read per request.
+   *
+   * `undefined` and `[]` are deliberately NOT collapsed: the first means the
+   * user has never opened the picker, and the second means they unticked
+   * everything. Reading the stored field directly rather than through
+   * `relaySettingsOf` is what preserves that, since the relay's own settings
+   * object has no reason to carry a list it never consults.
+   */
+  const lanModelsOf = (): readonly string[] | undefined => readAggregateSettingsSync().relay?.models
   const shims = {
     cn: createWorkBuddyShim({
       pool: core.pool,
@@ -1064,6 +1102,16 @@ function canonicalJson(value: unknown): string {
       // lane's own prefix, which is what selects the upstream, so it needs no
       // gateway of its own and no second loopback listener.
       extra: { free: freeLane },
+      // The login channels ride on the CN shim too, for the same reason the
+      // aggregate and free lanes do: their ids carry their own channel prefix, so
+      // the shim selects the upstream from the id and needs no listener of its
+      // own. It is also the shim the LAN relay forwards to, which makes this the
+      // one place those models become reachable over OpenAI wire.
+      channels: channelLane,
+      // The card's Gateway checkboxes. Enforced only on relay-originated
+      // requests, so DSH's own picker is never narrowed by a list meant for
+      // other machines.
+      lanModels: lanModelsOf,
     }),
     global: createWorkBuddyShim({ pool: core.pool, client: core.client, catalog: core.catalogs.global, logger: ctx.logger, region: 'global', usageRecorder }),
   } as const
@@ -1104,6 +1152,19 @@ function canonicalJson(value: unknown): string {
   })
   void relay.ready.catch((error: unknown) => {
     ctx.logger.warn(`xdpool relay: startup failed — ${String(error)}`)
+  })
+  /**
+   * The relay document the Gateway card reads.
+   *
+   * One loader for BOTH routes rather than a per-route assembly: the card takes
+   * the write response as the new state, so a save that answered with only the
+   * listener status dropped the picker's roster off the card until the next poll.
+   */
+  const relayDocument = () => relayDocumentOf({
+    status: () => relay.status(),
+    shared: () => readAggregateSettingsSync().relay?.models,
+    roster: () => shim.roster(),
+    warn: error => ctx.logger.warn('dsh-xdpool: gateway roster failed', error),
   })
   // Same-origin routes backing the XD Pool settings card. `webServer`
   // is an optional service: on a headless profile without it, no card routes
@@ -1451,7 +1512,15 @@ function canonicalJson(value: unknown): string {
     // normal case on a machine that has not installed it.
     billionDocument: readBillionStatus,
     /**
-     * Relay state and patches.
+     * Relay state plus the gateway's model picker.
+     *
+     * The candidates come from the shim's own roster rather than a parallel
+     * assembly here, so the card cannot offer a model the gateway would then
+     * refuse — the exact drift the picker exists to prevent.
+     */
+    relayDocument,
+    /**
+     * Apply one patch from the card and answer with the fresh document.
      *
      * The write path mints a key when the card asks for a rotation and the user
      * has never had one: an enabled relay with no key would have to either refuse
@@ -1459,7 +1528,6 @@ function canonicalJson(value: unknown): string {
      * one keeps "enabled" honest, and the card shows it so it can be pasted into
      * the other device.
      */
-    relayDocument: async (): Promise<PoolWebRelayStatus> => relay.status(),
     saveRelay: async (patch: PoolWebRelayPatch): Promise<PoolWebRelayStatus> => {
       const current = readAggregateSettingsSync()
       const before = current.relay ?? {}
@@ -1473,13 +1541,20 @@ function canonicalJson(value: unknown): string {
         // Falling back to the stored key means a first-time enable does not
         // accidentally rotate and lock out a device the user already set up.
         key: key ?? before.key ?? newRelayKey(),
+        // Passed through as written: an empty array is "share nothing", a
+        // decision, not an absence. The store trims and de-duplicates on the way in.
+        ...(patch.models === undefined ? {} : { models: patch.models }),
       }
       await writeRelaySetting(wanted)
       // Re-evaluate the listener from what was actually persisted, not from the
       // patch: a port the store refused (out of range) must not leave the
       // relay listening where the user asked when the file says otherwise.
       await relay.sync()
-      return relay.status()
+      // The SAME document the GET answers with, not the bare listener status: the
+      // card renders the write response as the new state, so an answer without the
+      // roster blanked the model picker on every save — switch, address, key, or
+      // the share list itself.
+      return relayDocument()
     },
   }))
   api = {

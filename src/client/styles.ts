@@ -1044,6 +1044,21 @@ export const GATEWAY_CARD_CSS = `
 .dsm-xdpool-gw-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .dsm-xdpool-gw-flash{margin:0;padding:6px 10px;border-radius:9px;border:1px solid color-mix(in srgb, var(--dsw-alias-border-l1,#ffffff14) 70%, transparent);background:color-mix(in srgb, var(--dsw-alias-bg-layer-1,#191a1e) 72%, transparent);color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11px;line-height:17px;word-break:break-word}
 .dsm-xdpool-gw-btn{appearance:none;display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:11.5px;font-weight:560;line-height:17px;padding:4px 12px;border-radius:8px;border:1px solid color-mix(in srgb, var(--dsw-alias-border-l2,#36373b) 85%, transparent);background:color-mix(in srgb, var(--dsw-alias-bg-layer-3,#2a2c33) 70%, transparent);color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:pointer;white-space:nowrap;transition:border-color .16s ease,color .16s ease,background .16s ease,transform .18s var(--ease-instrument,cubic-bezier(.16,1,.3,1))}
+/* The gateway's shared-model picker. Grouped by lane, and each row carries BOTH
+   the display name and the wire id, because for the login channels they are
+   different words: the user knows the model as "Qwen3.8-Flash · 免费" and has to
+   type "qfmodel" into the client. Showing only one of the two makes the list
+   either unreadable or unusable. */
+.dsm-xdpool-gw-group{margin-top:10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.dsm-xdpool-gw-group-title{margin:0 0 2px;color:var(--dsw-alias-label-tertiary,#8a90a0);font-size:11px;line-height:16px;font-weight:650;letter-spacing:.1px;text-transform:lowercase}
+.dsm-xdpool-gw-model{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:center;gap:8px;padding:3px 6px;border-radius:8px;cursor:pointer;min-width:0}
+.dsm-xdpool-gw-model:hover{background:color-mix(in srgb, var(--dsw-alias-bg-layer-1,#191a1e) 60%, transparent)}
+.dsm-xdpool-gw-model input{appearance:none;width:14px;height:14px;margin:0;border-radius:4px;border:1px solid var(--dsw-alias-border-l2,#36373b);background:color-mix(in srgb, var(--dsw-alias-bg-layer-1,#191a1e) 78%, transparent);cursor:pointer;display:grid;place-items:center}
+.dsm-xdpool-gw-model input:checked{background:var(--dsw-alias-brand-primary,#5686fe);border-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-xdpool-gw-model input:checked::after{content:"";width:6px;height:3px;border-left:1.5px solid #fff;border-bottom:1.5px solid #fff;transform:rotate(-45deg) translateY(-1px)}
+.dsm-xdpool-gw-model input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-xdpool-gw-model-name{color:var(--dsw-alias-label-primary,#e8e8ea);font-size:12px;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.dsm-xdpool-gw-model-id{font-family:var(--dsw-alias-font-mono,ui-monospace,Menlo,Consolas,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a90a0);white-space:nowrap}
 .dsm-xdpool-gw-btn:hover:not(:disabled){transform:translateY(-1px);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary,#5686fe) 55%, var(--dsw-alias-border-l2,#36373b));color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dsm-xdpool-gw-btn:active:not(:disabled){transform:translateY(0);box-shadow:inset 0 2px 4px rgb(0 0 0 / 22%)}
 .dsm-xdpool-gw-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:2px}

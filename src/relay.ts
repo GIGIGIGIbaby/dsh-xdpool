@@ -30,12 +30,16 @@ import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { WorkBuddyShim } from './shim.ts'
+import { RELAY_HOP_HEADER } from './shim.ts'
+import type { GatewayModelEntry } from './shim.ts'
+import type { PoolWebRelayStatus } from './status-paths.ts'
 /**
  * Marked on every forwarded request so a relay pointed at its own address
- * refuses instead of looping. A client has no reason to send it, and refusing
- * is cheaper than debugging a request storm you caused by accident.
+ * refuses instead of looping, and so the shim can tell a LAN client from the
+ * host's own adapter. Re-exported for callers that read the relay's contract
+ * rather than the shim's.
  */
-export const RELAY_HOP_HEADER = 'x-xdpool-relay-hop'
+export { RELAY_HOP_HEADER }
 /**
  * The only paths this relay forwards.
  *
@@ -370,4 +374,43 @@ export function createPoolRelay(options: PoolRelayOptions): PoolRelay {
 /** A fresh relay key: 32 random bytes, URL-safe so it survives a copy-paste. */
 export function newRelayKey(): string {
   return randomBytes(32).toString('base64url')
+}
+/**
+ * Compose the relay document the Gateway card renders.
+ *
+ * Extracted, and awaited HERE, because the bug this shape exists to prevent is
+ * invisible at the call site: `status()` is async, and
+ * `{ ...relay.status(), candidates }` spreads a PENDING PROMISE, which yields no
+ * own properties at all. The document then carries the new fields and silently
+ * drops `enabled`, `listening`, `host`, `port`, `key` and `error` — a card with no
+ * switch, no key and no endpoint, served over HTTP 200 with nothing to indicate it
+ * broke. This happened when the picker was added; the assertions below are the
+ * reason it cannot happen quietly again.
+ *
+ * Every input is a function so a test can hand it a rejecting roster and still
+ * require the rest of the document to arrive.
+ */
+export async function relayDocumentOf(input: {
+  status: () => Promise<PoolRelayStatus>
+  shared: () => readonly string[] | undefined
+  roster: () => Promise<readonly GatewayModelEntry[]>
+  warn?: (error: unknown) => void
+}): Promise<PoolWebRelayStatus> {
+  const status = await input.status()
+  let candidates: readonly GatewayModelEntry[]
+  try {
+    candidates = await input.roster()
+  } catch (error: unknown) {
+    // A roster that cannot be read must not take the panel down with it: the
+    // switch, the key and the address are all still usable, and the picker is the
+    // one part that can honestly say "nothing to show right now".
+    input.warn?.(error)
+    candidates = []
+  }
+  const shared = input.shared()
+  return {
+    ...status,
+    candidates,
+    ...(shared === undefined ? {} : { shared }),
+  }
 }

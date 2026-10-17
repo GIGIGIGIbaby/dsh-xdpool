@@ -69,6 +69,37 @@ export function GatewayPage({ t }: GatewayPageProps) {
   const [revealed, setRevealed] = useState(false)
   const [host, setHost] = useState<string>('127.0.0.1')
   const [port, setPort] = useState<string>('8326')
+  /**
+   * The in-progress share list, or undefined while it still mirrors the server.
+   *
+   * Held as a draft for the same reason the model card holds one: saving is a
+   * deliberate act here, because every unchecked row stops working on whatever
+   * device is already pointed at the gateway.
+   */
+  const [draftShared, setDraftShared] = useState<ReadonlySet<string> | undefined>(undefined)
+  /**
+   * Which ids are shared right now.
+   *
+   * `status.shared === undefined` means the user has never chosen, and the
+   * gateway is serving everything — so the picker must show every row ticked
+   * rather than an empty list, which would read as "nothing is shared" and invite
+   * a save that closes a gateway that was open.
+   */
+  const candidates = status?.candidates ?? []
+  const serverShared = status?.shared ?? candidates.map(row => row.id)
+  const shared = draftShared ?? new Set(serverShared)
+  const sharedDirty = draftShared !== undefined
+    && (draftShared.size !== serverShared.length
+      || [...draftShared].some(id => !serverShared.includes(id)))
+  const toggleShared = (id: string): void => {
+    const next = new Set(shared)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setDraftShared(next)
+  }
+  const setAllShared = (on: boolean): void => {
+    setDraftShared(on ? new Set(candidates.map(row => row.id)) : new Set<string>())
+  }
   /** True once the server's values were adopted, so polls do not stomp edits. */
   const seeded = useRef(false)
   const mounted = useRef(true)
@@ -269,6 +300,74 @@ export function GatewayPage({ t }: GatewayPageProps) {
           </button>
         </div>
         <p className="dsm-xdpool-gw-note">{t?.('gw.keyHint') ?? ''}</p>
+      </div>
+      <div className="dsm-xdpool-sec">
+        <p className="dsm-xdpool-sectitle">{t?.('gw.share') ?? 'Shared models'}</p>
+        <p className="dsm-xdpool-gw-note">{t?.('gw.shareHint') ?? ''}</p>
+        {candidates.length === 0
+          ? <p className="dsm-xdpool-gw-note">{t?.('gw.shareNone') ?? ''}</p>
+          : (
+            <>
+              <div className="dsm-xdpool-gw-actions">
+                <button
+                  type="button"
+                  className="dsm-xdpool-gw-btn"
+                  data-on="false"
+                  disabled={busy}
+                  onClick={() => { setAllShared(true) }}
+                >
+                  {t?.('gw.shareAll') ?? 'Select all'}
+                </button>
+                <button
+                  type="button"
+                  className="dsm-xdpool-gw-btn"
+                  data-on="false"
+                  disabled={busy}
+                  onClick={() => { setAllShared(false) }}
+                >
+                  {t?.('gw.shareNoneBtn') ?? 'Select none'}
+                </button>
+                <button
+                  type="button"
+                  className="dsm-xdpool-gw-btn"
+                  data-on="true"
+                  disabled={busy || !sharedDirty}
+                  onClick={() => {
+                    void write({ models: [...shared] }).then(() => { setDraftShared(undefined) })
+                  }}
+                >
+                  {t?.('gw.shareSave') ?? 'Save'}
+                </button>
+              </div>
+              {sharedDirty
+                ? <p className="dsm-xdpool-gw-warn">{t?.('gw.shareDirty') ?? ''}</p>
+                : null}
+              {/* Grouped by lane, because the same model name appears under
+                  several channels and a flat list of 140 rows cannot say which
+                  one a tick actually enables. */}
+              {[...new Set(candidates.map(row => row.source))].map(source => (
+                <div className="dsm-xdpool-gw-group" key={source}>
+                  <p className="dsm-xdpool-gw-group-title">{source}</p>
+                  {candidates.filter(row => row.source === source).map(row => (
+                    <label className="dsm-xdpool-gw-model" key={row.id}>
+                      <input
+                        type="checkbox"
+                        checked={shared.has(row.id)}
+                        disabled={busy}
+                        onChange={() => { toggleShared(row.id) }}
+                      />
+                      {/* The display name first and the wire id second: the name
+                          is how the user picks, and the id is what they then have
+                          to type into the client. `qfmodel` alone would make this
+                          list unreadable. */}
+                      <span className="dsm-xdpool-gw-model-name">{row.name}</span>
+                      <span className="dsm-xdpool-gw-model-id">{row.id}</span>
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </>
+          )}
       </div>
       <div className="dsm-xdpool-sec">
         <p className="dsm-xdpool-sectitle">{t?.('gw.usage') ?? 'Using it'}</p>

@@ -35,6 +35,7 @@ import type { AggregateStore } from './store.ts'
 import { paidAlternativeFor } from './siblings.ts'
 import { inspectSseFrame, StreamTracker, type UsageRecorder } from './stats.ts'
 import { FREE_CHANNEL, FREE_MODEL_PREFIX } from './free-catalog.ts'
+import { ChannelRequestError, type ChannelLane } from './channel-lane.ts'
 export interface ShimLogger {
   info?(...args: unknown[]): void
   warn(...args: unknown[]): void
@@ -44,7 +45,84 @@ export interface WorkBuddyShim {
   ready: Promise<void>
   baseUrl(): string
   token(): string
+  /**
+   * Everything the gateway could serve, with display names.
+   *
+   * The card's model picker reads this; `/v1/models` maps the same entries down
+   * to ids. One source so the card cannot offer a model the gateway then refuses.
+   */
+  roster(): Promise<readonly GatewayModelEntry[]>
   close(): Promise<void>
+}
+/**
+ * One gateway-visible model: the id a client sends, the name a human reads, and
+ * the lane it belongs to.
+ *
+ * Both are needed because they disagree in exactly the places that matter. A
+ * qoder model is `qfmodel` on the wire and `Qwen3.8-Flash · 免费` in every
+ * interface the user has met it in, and the OpenAI `/v1/models` schema has no
+ * field for the second — so the name can only ever be shown here, on the card.
+ */
+export interface GatewayModelEntry {
+  id: string
+  name: string
+  source: string
+}
+/**
+ * The namespace the gateway lists POOL rows under.
+ *
+ * The listing already speaks three prefixes — `combo:<slug>` for a chain,
+ * `free:<model>` for the keyless lane, and a composite `providerId/modelId` for
+ * every aggregate row — and only the pool's own models were listed bare. A
+ * client reading `/v1/models` therefore could tell three lanes apart and could
+ * not tell the fourth from anything else, which is the opposite of what a
+ * listing is for.
+ *
+ * A prefix rather than a slash, because the slash IS the aggregate
+ * discriminator: `parseProviderModelId` splits on the first `/`, so a prefixed
+ * id spelled with a slash would be read as an aggregate row and sent to the
+ * wrong lane.
+ *
+ * `buddy:` because that is what this lane is. `REGISTERED_CHANNELS` in
+ * `channels.ts` gives `buddy` to WorkBuddy 国内版 (`copilot.tencent.com`) and
+ * `workbuddy` to 国际版, and the relay is wired to `shims.cn` — the domestic
+ * pool. Naming the lane after the vendor rather than after the mechanism keeps it
+ * consistent with every channel row the gateway lists, and it leaves `workbuddy:`
+ * free for the international pool whenever `shims.global` is exposed too.
+ *
+ * Bare pool ids keep being accepted. Clients configured before this existed are
+ * not broken by it; they are just no longer the only way to say it.
+ */
+export const POOL_MODEL_PREFIX = 'buddy:'
+/**
+ * The lane this shim's pool rows belong to, spelled the way the channel registry
+ * spells it. Exported so the card and the channel listing can agree on which
+ * channel ids the pool already covers instead of each keeping its own list.
+ */
+export const POOL_LANE_CHANNEL_ID = 'buddy'
+/**
+ * Prefixes reserved for lane routing. A channel must not be listed under one of
+ * these, because its rows would then be indistinguishable from the lane that
+ * owns the prefix.
+ */
+export const RESERVED_MODEL_PREFIXES: readonly string[] = [
+  POOL_MODEL_PREFIX,
+  FREE_MODEL_PREFIX,
+  `${COMBO_CHANNEL}:`,
+]
+/**
+ * Whether one channel id is already spoken for by a lane.
+ *
+ * The pool-owned ids are the interesting case rather than an accident: `buddy`
+ * and `workbuddy` ARE account pools this plugin serves itself, so listing them
+ * again as channels would offer the same models twice under two routes.
+ */
+export function channelListableAsRows(
+  channelId: string,
+  poolOwned: ReadonlySet<string> = new Set([POOL_LANE_CHANNEL_ID]),
+): boolean {
+  if (poolOwned.has(channelId)) return false
+  return !RESERVED_MODEL_PREFIXES.includes(`${channelId}:`)
 }
 /**
  * Everything the aggregate lane needs to answer one request.
@@ -69,7 +147,15 @@ export interface ExtraLaneOptions {
   free: ExtraLaneSource
 }
 export interface ExtraLaneSource {
-  current: () => readonly { modelId: string; id: string }[]
+  /**
+   * The rows this lane offers.
+   *
+   * `name` is the human-facing display name the free catalog already keeps (a
+   * raw upstream id is deliberately never shown to a picker); it is optional
+   * here because the lane's own contract only ever needed the ids, and the
+   * gateway's model picker is the first consumer that wants the label too.
+   */
+  current: () => readonly { modelId: string; id: string; name?: string }[]
   /**
    * Run one turn, handing back the frames to write.
    *
@@ -123,8 +209,45 @@ export interface WorkBuddyShimOptions {
    * give the user two names for one lane.
    */
   extra?: ExtraLaneOptions
+  /**
+   * The fifth lane: the 扫码登录 channels, reached through the host's own LLM
+   * seam rather than a socket this plugin owns.
+   *
+   * CN-shim-only for the aggregate lane's reason — a second copy under the
+   * global provider id would list every channel twice — and the relay is wired to
+   * this shim, so this is also the only shim the LAN gateway can see.
+   */
+  channels?: ChannelLane
+  /**
+   * The gateway allowlist, re-read per request.
+   *
+   * `undefined` means "no selection has been made: serve everything to LAN
+   * clients too", so upgrading cannot silently break a device already pointed at
+   * the relay. An empty array is the opposite answer — the user unticked
+   * everything — and is enforced as such.
+   *
+   * Only consulted for requests carrying {@link RELAY_HOP_HEADER}, which is the
+   * relay's own marker. The host's adapter reaches this same process without it,
+   * so the models DSH offers in its picker are never narrowed by a list meant
+   * for other machines.
+   */
+  lanModels?: () => readonly string[] | undefined
 }
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
+/**
+ * Marked by the LAN relay on every request it forwards.
+ *
+ * Defined here rather than in `relay.ts` because the shim has to READ it, and
+ * `relay.ts` already depends on this module — importing back would be a cycle.
+ *
+ * It is also the only safe way to scope the gateway allowlist. This one process
+ * serves two very different callers: the host's own adapter (so every model
+ * DSH's picker offers, and every turn the user has in chat) and, through the
+ * relay, whatever device on the LAN holds the key. Gating the shim outright
+ * would gate the user's own chat with it; gating on this header restricts the
+ * LAN surface and leaves the host untouched.
+ */
+export const RELAY_HOP_HEADER = 'x-xdpool-relay-hop'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 /** HTTP status each upstream failure class surfaces as. */
 const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
@@ -273,6 +396,8 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const logger = options.logger
   const aggregate = options.aggregate
   const extra = options.extra
+  const channels = options.channels
+  const lanModels = options.lanModels
   const maxAttempts = options.maxAttempts ?? 8
   // Per-process secret. The adapter resolves this as the OpenAI apiKey; the
   // shim never forwards it, because the real token comes from the pool.
@@ -423,6 +548,171 @@ function withBareModelId(raw: string, modelId: string): string {
     res.end()
   }
   /**
+   * Serve one login-channel turn.
+   *
+   * The lane yields already-translated events; this function owns the wire. It
+   * writes each delta as it arrives rather than collecting first, because
+   * time-to-first-token is the entire reason a client points at a gateway, and
+   * buffering would make a channel feel slower than using it through the picker.
+   *
+   * `stream: false` is honoured here — one `chat.completion`, no SSE. The pool
+   * lane forces streaming (`prepareChatBody`), so the two lanes differ on
+   * purpose; making the channel lane copy that deviation would mean a client's
+   * parse strategy depended on which lane a model happened to sit in.
+   */
+  async function serveChannelCompletion(
+    res: ServerResponse,
+    raw: string,
+    modelId: string,
+    target: { channel: string; modelId: string },
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (channels === undefined) return
+    let body: Record<string, unknown>
+    try {
+      body = JSON.parse(raw) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    const nonStreaming = body.stream === false
+    const created = Math.floor(Date.now() / 1000)
+    const completionId = `chatcmpl-xdpool-${randomBytes(6).toString('base64url')}`
+    let text = ''
+    let reasoning = ''
+    let toolCalls: Record<string, unknown>[] = []
+    let usage: Record<string, number> | undefined
+    let finish = 'stop'
+    let started = false
+    /** Open the SSE body on the first delta, so an early failure is a status. */
+    const begin = (): void => {
+      if (started || nonStreaming) return
+      started = true
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      })
+    }
+    const writeFrame = (payload: Record<string, unknown>): void => {
+      begin()
+      if (started) res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    }
+    const chunk = (delta: Record<string, unknown>, reason: string): Record<string, unknown> => ({
+      id: completionId,
+      object: 'chat.completion.chunk',
+      created,
+      // The bare model id, not the composite the client sent: an echo of
+      // `qoder:Foo` here would make a client that keys off `model` treat every
+      // turn as a different model.
+      model: target.modelId,
+      choices: [{ index: 0, delta, finish_reason: reason }],
+      usage: null,
+    })
+    try {
+      for await (const event of channels.turn({
+        channel: target.channel,
+        modelId: target.modelId,
+        body,
+        signal,
+      })) {
+        if (event.kind === 'usage') {
+          usage = event.usage
+          continue
+        }
+        if (event.kind === 'done') {
+          finish = event.finishReason
+          continue
+        }
+        const delta = event.delta
+        if (typeof delta.content === 'string') text += delta.content
+        if (typeof delta.reasoning_content === 'string') reasoning += delta.reasoning_content
+        if (Array.isArray(delta.tool_calls)) {
+          for (const call of delta.tool_calls as Record<string, unknown>[]) {
+            const index = Number(call.index ?? toolCalls.length)
+            toolCalls[index] = mergeToolCallFragment(toolCalls[index] ?? {}, call)
+          }
+        }
+        if (!nonStreaming) writeFrame(chunk(delta, ''))
+      }
+    } catch (error: unknown) {
+      if (started) {
+        // Mid-stream there is no status left to send; terminate so the client's
+        // decoder closes instead of hanging on a stream that will never finish.
+        res.write('data: [DONE]\n\n')
+        res.end()
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof ChannelRequestError) {
+        // The client's request cannot be served as written — an image the lane
+        // will not carry, for instance. Saying 400 here matters because the
+        // alternative is a 502 that reads like an upstream outage while the
+        // picture the user sent is what was actually refused.
+        writeOpenAIError(res, 400, 'invalid_request', message)
+        return
+      }
+      writeOpenAIError(res, 502, 'channel_upstream_error', `channel ${target.channel}: ${message}`)
+      return
+    }
+    if (nonStreaming) {
+      writeJson(res, 200, {
+        id: completionId,
+        object: 'chat.completion',
+        created,
+        model: target.modelId,
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: text === '' && toolCalls.length > 0 ? null : text,
+            ...(reasoning === '' ? {} : { reasoning_content: reasoning }),
+            ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
+          },
+          finish_reason: finish,
+        }],
+        ...(usage === undefined ? {} : { usage }),
+      })
+      return
+    }
+    begin()
+    res.write(`data: ${JSON.stringify(chunk({}, finish))}\n\n`)
+    if (usage !== undefined) {
+      res.write(`data: ${JSON.stringify({ ...chunk({}, finish), usage })}\n\n`)
+    }
+    // Always terminated, even when the channel sent nothing: a decoder with no
+    // `[DONE]` reads a finished turn as a stream the gateway cut, and the host
+    // answers that with a retry.
+    res.write('data: [DONE]\n\n')
+    res.end()
+  }
+  /**
+   * Fold one tool-call fragment into its slot.
+   *
+   * The host streams a call as an opening fragment carrying `name` then argument
+   * deltas that do not, so the name must survive the merge while the argument
+   * strings concatenate in arrival order.
+   */
+  function mergeToolCallFragment(
+    existing: Record<string, unknown>,
+    fragment: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const before = (existing.function ?? {}) as Record<string, unknown>
+    const next = (fragment.function ?? {}) as Record<string, unknown>
+    const merged: Record<string, unknown> = {
+      ...existing,
+      ...fragment,
+      function: {
+        ...before,
+        ...next,
+        arguments: `${String(before.arguments ?? '')}${String(next.arguments ?? '')}`,
+      },
+    }
+    if (typeof fragment.id === 'string' && fragment.id !== '') merged.id = fragment.id
+    else if (typeof existing.id === 'string') merged.id = existing.id
+    return merged
+  }
+  /**
    * Serve one aggregate turn: forward to the provider, stream back verbatim.
    *
    * No account rotation and no compaction retry. The first is honest — the key
@@ -525,6 +815,99 @@ function withBareModelId(raw: string, modelId: string): string {
       // Keep the previous reading; the next request tries again.
     }
   }
+  /**
+   * Whether this request came in through the LAN relay.
+   *
+   * The relay stamps the header on what it forwards and strips any client-supplied
+   * copy, so this is a fact about the path the request took rather than something
+   * a caller can claim.
+   */
+  const fromLan = (req: IncomingMessage): boolean => req.headers[RELAY_HOP_HEADER] !== undefined
+  /**
+   * The allowlist LAN clients are held to, or undefined when there is none.
+   *
+   * `undefined` covers both "the build has no allowlist wired" and "the user has
+   * never chosen one", and both mean serve everything — a gateway that answered
+   * 403 to every model before the user had seen the picker would look like the
+   * feature is broken rather than unset. A throwing reader is treated the same
+   * way: refusing a whole gateway over an unreadable file is worse than serving
+   * it, because the user cannot fix what they cannot reach.
+   */
+  const lanAllowlist = (): ReadonlySet<string> | undefined => {
+    if (lanModels === undefined) return undefined
+    try {
+      const list = lanModels()
+      return list === undefined ? undefined : new Set(list)
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * Everything this shim could serve, with the name a human would recognise.
+   *
+   * One function for two consumers on purpose. `/v1/models` needs the ids, and
+   * the card's Gateway picker needs the ids AND the display name — a channel
+   * model is `qfmodel` on the wire but reads `Qwen3.8-Flash · 免费` everywhere the
+   * user has seen it so far. If the picker assembled its own list, the two would
+   * drift, and the failure would be invisible: the card offers a model the
+   * gateway then refuses, or hides one it serves.
+   *
+   * `source` is the value `/v1/models` reports as `owned_by`, and also what the
+   * picker groups rows under.
+   */
+  async function roster(): Promise<readonly GatewayModelEntry[]> {
+    const entries: GatewayModelEntry[] = []
+    // `visible()`, not `current()`: the model selection is the user's answer to
+    // "which of these may I use", and the host's own picker reads it through
+    // `registerModelDiscovery` → `visible()`. Listing the full catalog made the
+    // OpenAI endpoint advertise models the user had switched OFF, so the two
+    // faces of one plugin disagreed.
+    for (const model of catalog.visible()) {
+      entries.push({
+        id: `${POOL_MODEL_PREFIX}${model.id}`,
+        name: model.name ?? model.id,
+        source: 'workbuddy',
+      })
+    }
+    if (aggregate !== undefined) {
+      for (const row of aggregate.catalog.current()) {
+        // A chain has no vendor of its own; naming it after its first member would
+        // claim a provider the chain is not bound to, and `combo:` says plainly
+        // that this is a route over other rows.
+        entries.push({
+          id: row.id,
+          name: row.name ?? row.id,
+          source: isComboRow(row) ? COMBO_CHANNEL : row.providerId,
+        })
+      }
+    }
+    // The extra lanes list under their OWN channel tag, never under the shim's
+    // owner: a `free:` row served here is not WorkBuddy traffic, and `owned_by`
+    // is what a client reads to tell them apart.
+    if (extra !== undefined) {
+      for (const row of extra.free.current()) {
+        entries.push({
+          id: row.modelId,
+          name: row.name ?? row.modelId,
+          source: FREE_CHANNEL,
+        })
+      }
+    }
+    if (channels !== undefined) {
+      // `listModels` is a round trip per channel, and each one already swallows
+      // its own failure inside the lane. Wrapped again so a lane that throws
+      // outright cannot blank the pool rows too — an empty gateway is a worse
+      // answer than a partial one.
+      try {
+        for (const row of await channels.rows()) {
+          entries.push({ id: row.id, name: row.name, source: row.channel })
+        }
+      } catch (error: unknown) {
+        logger?.warn?.(`dsh-xdpool: channel listing failed: ${String(error)}`)
+      }
+    }
+    return entries
+  }
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       if (!hostIsLoopback(req.headers.host)) {
@@ -545,33 +928,25 @@ function withBareModelId(raw: string, modelId: string): string {
         return
       }
       if (req.method === 'GET' && (url === '/v1/models' || url === '/v1/models/')) {
-        // Both lanes answer here. A composite id can only come from the
-        // aggregate lane, so listing one is the honest answer to "what does this
-        // provider serve" — and the pool lane keeps listing its own rows.
-        const rows: { id: string; object: string; created: number; owned_by: string }[] = catalog.current().map(model => ({
-          id: model.id,
+        // Both lanes answer here. A composite id can only come from the aggregate
+        // lane, so listing one is the honest answer to "what does this provider
+        // serve" — and the pool lane keeps listing its own rows.
+        const rows = (await roster()).map(entry => ({
+          id: entry.id,
           object: 'model',
           created: 0,
-          owned_by: 'workbuddy',
+          owned_by: entry.source,
         }))
-        if (aggregate !== undefined) {
-          for (const row of aggregate.catalog.current()) {
-            // A chain has no vendor of its own; naming it after its first
-            // member would claim a provider the chain is not bound to, and
-            // `combo:` says plainly that this is a route over other rows.
-            const ownedBy = isComboRow(row) ? COMBO_CHANNEL : row.providerId
-            rows.push({ id: row.id, object: 'model', created: 0, owned_by: ownedBy })
-          }
-        }
-        // The two extra lanes list under their OWN channel tag, never under the
-        // shim's owner: a `free:` row served here is not WorkBuddy traffic, and
-        // the `owned_by` field is what a client reads to tell them apart.
-        if (extra !== undefined) {
-          for (const row of extra.free.current()) {
-            rows.push({ id: row.modelId, object: 'model', created: 0, owned_by: FREE_CHANNEL })
-          }
-        }
-        writeJson(res, 200, { object: 'list', data: rows })
+        // The allowlist narrows what a LAN client is TOLD about; the same list is
+        // enforced on the completion below, so a hidden model is also an
+        // unreachable one rather than merely absent from a listing a client can
+        // ignore. Only relay-originated requests are filtered — the host reads
+        // this same route for its own picker.
+        const allowed = fromLan(req) ? lanAllowlist() : undefined
+        writeJson(res, 200, {
+          object: 'list',
+          data: allowed === undefined ? rows : rows.filter(row => allowed.has(row.id)),
+        })
         return
       }
       if (req.method === 'POST' && (url === '/v1/chat/completions' || url === '/v1/chat/completions/')) {
@@ -753,6 +1128,25 @@ function withBareModelId(raw: string, modelId: string): string {
     } catch {
       modelId = undefined
     }
+    // The gateway allowlist, enforced on the id the caller actually sent — so it
+    // is checked before any lane strips a prefix or rewrites the body, and a
+    // client cannot reach a model by guessing the spelling a lane happens to
+    // accept. This is what makes the card's checkboxes real: the listing hides an
+    // unchecked model, and this refuses it.
+    if (fromLan(req)) {
+      const allowed = lanAllowlist()
+      if (allowed !== undefined && (modelId === undefined || !allowed.has(modelId))) {
+        writeOpenAIError(
+          res,
+          403,
+          'model_not_shared',
+          modelId === undefined
+            ? 'no model was named, and this gateway only serves the models shared on its XD Pool card'
+            : `${modelId} is not shared on this gateway; enable it in XD Pool → Gateway`,
+        )
+        return
+      }
+    }
     // Two lanes, decided by the model id's own shape: the aggregate lane
     // advertises composite `providerId/modelId` ids and nothing else does, so the
     // split needs no extra header and cannot be spoofed by a caller that guessed
@@ -810,10 +1204,42 @@ function withBareModelId(raw: string, modelId: string): string {
       )
       return
     }
-    const prepared = client.prepareChatBody(raw)
+    // The login channels are routed last of the prefixed lanes: their ids are
+    // `<channel>:<model>`, and every channel above (`combo:`, `free:`) is checked
+    // first so a chain or a keyless row can never be re-read as a channel.
+    // An id whose prefix is not a configured channel falls through to the pool
+    // unchanged, which is how every unknown id already behaves here.
+    if (channels !== undefined && modelId !== undefined) {
+      const target = channels.resolve(modelId)
+      if (target !== undefined) {
+        await serveChannelCompletion(res, raw, modelId, target, controller.signal)
+        return
+      }
+    }
+    // A `buddy:` id names this lane, and the pooled upstream wants the BARE
+    // model id: `prepareChatBody` passes `model` through untouched, so the prefix
+    // has to come off the body as well as off the id used as the cooldown key.
+    // Doing only the latter would route correctly and then send an upstream a
+    // model it has never heard of.
+    //
+    // Stripped here — after the chain, aggregate and extra lanes have each had
+    // their chance — so the prefix cannot be used to reach a lane the caller
+    // would not otherwise have named. A remainder that itself spells another lane
+    // is refused rather than silently re-routed.
+    let poolRaw = raw
+    if (modelId !== undefined && modelId.startsWith(POOL_MODEL_PREFIX)) {
+      const bare = modelId.slice(POOL_MODEL_PREFIX.length)
+      if (bare === '' || bare.startsWith(FREE_MODEL_PREFIX) || isComboId(bare) || bare.includes('/')) {
+        writeOpenAIError(res, 404, 'model_not_found', `${modelId} is not a pool model`)
+        return
+      }
+      modelId = bare
+      poolRaw = JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: bare })
+    }
+    const prepared = client.prepareChatBody(poolRaw)
     // `sticky` binds each conversation to one account; the pool ignores this
     // under every other distribution.
-    const conversationKey = conversationKeyOf(raw)
+    const conversationKey = conversationKeyOf(poolRaw)
     // `modelId` is already read above, before the lane split. It doubles as the
     // cooldown key because the upstream rate limit is per-model ("可切换其他模型
     // 继续使用"): a 429 on `hy4-preview` only cools that model on the account,
@@ -1032,6 +1458,7 @@ function withBareModelId(raw: string, modelId: string): string {
   return {
     ready,
     baseUrl,
+    roster,
     token: () => SHARED_SECRET,
     close: () =>
       new Promise<void>((resolve, reject) => {

@@ -110,6 +110,40 @@ describe('relay settings store', () => {
       expect(store.readAggregateSettingsSync().relay).toBeUndefined()
     })
   })
+  it('stores the gateway share list, and stores "nothing" as nothing', async () => {
+    // The write door for the picker. `normalizeRelay` cleaned the field on the
+    // way in from disk, but `updateRelaySetting` had no branch for it at all, so
+    // saving from the card rewrote the section without it and the gateway stayed
+    // open — a save that reported success and changed nothing.
+    const { updateRelaySetting, readAggregateSettingsSync } = await import('../src/store.ts')
+    await withHome(async () => {
+      await updateRelaySetting({ enabled: true, models: ['buddy:hy3', 'qoder:qfmodel'] })
+      expect(readAggregateSettingsSync().relay?.models).toEqual(['buddy:hy3', 'qoder:qfmodel'])
+      await updateRelaySetting({ models: [] })
+      // An empty list is the user's answer, not an absence: it has to read back as
+      // `[]` so the gateway refuses everything instead of silently re-opening.
+      expect(readAggregateSettingsSync().relay?.models).toEqual([])
+    })
+  })
+  it('leaves the share list alone when a patch changes only the address', async () => {
+    const { updateRelaySetting, readAggregateSettingsSync } = await import('../src/store.ts')
+    await withHome(async () => {
+      await updateRelaySetting({ models: ['buddy:hy3'] })
+      await updateRelaySetting({ host: '0.0.0.0', port: 18326 })
+      // An absent field must not be read as "share nothing", or editing the
+      // listener would reopen a gateway on the wrong assumption.
+      expect(readAggregateSettingsSync().relay?.models).toEqual(['buddy:hy3'])
+      await updateRelaySetting({ key: KEY })
+      expect(readAggregateSettingsSync().relay?.models).toEqual(['buddy:hy3'])
+    })
+  })
+  it('cleans the list on the write door the same way the read door does', async () => {
+    const { updateRelaySetting, readAggregateSettingsSync } = await import('../src/store.ts')
+    await withHome(async () => {
+      await updateRelaySetting({ models: [' buddy:hy3 ', 'buddy:hy3', 7, null, 'qoder:qfmodel'] })
+      expect(readAggregateSettingsSync().relay?.models).toEqual(['buddy:hy3', 'qoder:qfmodel'])
+    })
+  })
   it('ignores a port it cannot bind instead of moving the relay somewhere else', async () => {
     const { updateRelaySetting, readAggregateSettingsSync } = await import('../src/store.ts')
     await withHome(async () => {
@@ -410,7 +444,13 @@ describe('relay route', () => {
     const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
     const at = source.indexOf('saveRelay: async')
     expect(at).toBeGreaterThan(-1)
-    const body = source.slice(at, at + 1200)
+    // Bounded by the end of the deps object rather than a fixed character count:
+    // a window measured in characters makes every added comment a threat to this
+    // test, and the failure it reports is "the text moved", not "the behaviour
+    // broke" — which is the one thing a source-scanning assertion must never do.
+    const end = source.indexOf('  }))', at)
+    expect(end).toBeGreaterThan(at)
+    const body = source.slice(at, end)
     // An empty key from the card means "rotate"; the store would read that as
     // "clear", so the new secret is minted on this side of the write.
     expect(body).toContain("patch.key === '' ? newRelayKey() : patch.key")

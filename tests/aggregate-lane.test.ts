@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from '../src/catalog.ts'
 import type { WorkBuddyAccountPool } from '../src/accounts.ts'
 import type { WorkBuddyUpstreamClient, WorkBuddyRegion } from '../src/upstream.ts'
-import { createWorkBuddyShim } from '../src/shim.ts'
+import { POOL_MODEL_PREFIX, createWorkBuddyShim } from '../src/shim.ts'
 import { AggregateCatalog, readSseHead } from '../src/aggregate.ts'
 import type { AggregateStore } from '../src/store.ts'
 /** A registry entry that takes an API key, speaks openai-chat, and lists a model. */
@@ -256,7 +256,9 @@ describe('the aggregate catalog lists both lanes', () => {
       expect(response.status).toBe(200)
       const payload = await response.json() as { data: { id: string; owned_by: string }[] }
       const ids = payload.data.map(entry => entry.id)
-      expect(ids).toContain('hy3')
+      // The pool row is listed under its own channel prefix and the aggregate row
+      // as a composite — two lanes, two self-describing spellings, one listing.
+      expect(ids).toContain(`${POOL_MODEL_PREFIX}hy3`)
       expect(ids).toContain(COMPOSITE_ID)
     } finally {
       await shim.close()

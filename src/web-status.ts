@@ -81,8 +81,8 @@ import {
   type PoolWebModelProbe,
   type PoolWebModelProbeResult,
   type PoolWebRelayPatch,
+  type PoolWebRelayStatus,
 } from './status-paths.ts'
-import type { PoolRelayStatus as PoolWebRelayStatus } from './relay.ts'
 /**
  * One aggregate model row as the card renders it.
  *

@@ -572,6 +572,14 @@ export interface PoolWebRelayPatch {
   host?: string
   port?: number
   key?: string
+  /**
+   * The models to share with LAN clients, by gateway id.
+   *
+   * An empty array is an answer, not an absence: it means the user unticked
+   * everything, and the gateway then refuses every model. Only "never set"
+   * leaves the gateway open.
+   */
+  models?: string[]
 }
 /**
  * What {@link POOL_RELAY_PATH} answers with.
@@ -598,6 +606,35 @@ export interface PoolWebRelayStatus {
   key: string
   /** Why nothing is bound; '' when there is nothing to explain. */
   error: string
+  /**
+   * Every model the gateway could serve, with the name a human reads.
+   *
+   * Built from the shim's own roster, so the picker cannot offer a model the
+   * gateway would then refuse. The name is here because the OpenAI `/v1/models`
+   * schema has no such field: `qfmodel` is what a client sends, and
+   * `Qwen3.8-Flash · 免费` is what the user knows it as, and only this card can
+   * show both together.
+   *
+   * REQUIRED, and required on the POST answer too: the card treats a write
+   * response as the new state, so a save that answered without the roster emptied
+   * the picker until the next poll. Declaring it optional let the write path
+   * return the bare listener status and typecheck clean.
+   */
+  candidates: readonly PoolWebGatewayModel[]
+  /**
+   * The shared list in force. `undefined` means the user has never chosen, which
+   * the card must render as "everything is shared" rather than an empty picker.
+   */
+  shared?: readonly string[]
+}
+/** One row of the gateway's model picker. */
+export interface PoolWebGatewayModel {
+  /** What a client sends, and what the allowlist stores. */
+  id: string
+  /** The display name from the lane that serves it. */
+  name: string
+  /** The lane or channel it belongs to; what the picker groups under. */
+  source: string
 }
 /**
  * What a key probe answered.

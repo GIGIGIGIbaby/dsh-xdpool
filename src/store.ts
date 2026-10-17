@@ -63,6 +63,21 @@ export interface RelaySetting {
   port?: number
   /** URL-safe shared secret LAN clients authenticate with. */
   key?: string
+  /**
+   * Which models the gateway may serve, by gateway id (`buddy:hy3`,
+   * `qoder:qfmodel`, `free:…`, `provider/model`).
+   *
+   * Absent and empty are DIFFERENT answers and the distinction is load-bearing:
+   * absent means "no selection has ever been made, serve everything", so
+   * upgrading does not silently break a gateway a device is already pointed at;
+   * empty means "the user unticked everything", and is honoured as such.
+   *
+   * This is an allowlist enforced on the request, not just on the listing. A
+   * relay key is one value shared by every device on the LAN, so "hidden from
+   * /v1/models" would leave every other lane reachable to anything that guessed
+   * an id — including the login channels, whose quota is this account's.
+   */
+  models?: string[]
 }
 export interface AggregateFile {
   version: number
@@ -191,7 +206,28 @@ function normalizeRelay(raw: unknown): RelaySetting | undefined {
   if (typeof value.port === 'number' && Number.isInteger(value.port)) relay.port = value.port
   const key = text(value.key)
   if (key !== '') relay.key = key
+  // An EMPTY array is preserved on purpose: it is the user's answer ("nothing"),
+  // and collapsing it to "absent" would silently re-open the whole gateway.
+  // Non-string entries are dropped rather than rejected, because this file also
+  // holds the API keys and one bad entry must not cost the user both.
+  if (Array.isArray(value.models)) {
+    relay.models = normalizeRelayModels(value.models)
+  }
   return Object.keys(relay).length === 0 ? undefined : relay
+}
+/**
+ * A shared-model list, cleaned: trimmed, de-duplicated, non-strings dropped.
+ *
+ * One helper for both doors into the field — reading the file and merging a
+ * patch — so a list saved from the card is stored exactly as a list loaded from
+ * disk would be, and the gateway cannot see two spellings of one selection.
+ */
+function normalizeRelayModels(raw: readonly unknown[]): string[] {
+  return [...new Set(
+    raw
+      .map(entry => text(entry))
+      .filter(entry => entry !== ''),
+  )]
 }
 /**
  * Write the store atomically: a sibling `.tmp` first, then a rename.
@@ -337,6 +373,13 @@ export async function updateRelaySetting(patch: Partial<RelaySetting>): Promise<
     const key = text(patch.key)
     if (key === '') delete after.key
     else after.key = key
+  }
+  if (patch.models !== undefined) {
+    // Stored as written, INCLUDING `[]`: an empty list is the user unticking
+    // everything, and the gateway reads the same absent-vs-empty rule back. An
+    // absent field leaves the stored list alone, so a save of the address or the
+    // key never reopens a closed gateway.
+    after.models = normalizeRelayModels(patch.models)
   }
   const next: AggregateStore = { ...current }
   // A section that carries nothing is removed instead of saved as `{}`: the card

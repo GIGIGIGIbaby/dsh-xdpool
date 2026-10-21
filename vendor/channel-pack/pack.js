@@ -37831,7 +37831,7 @@ var QODER_FALLBACK_MODELS = [
   { id: "gmodel", name: "GLM-5.3", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ["high", "low", "max"], defaultEffort: "max" },
   { id: "gfmodel", name: "GLM-5.3-Flash", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ["high", "max"], defaultEffort: "max" },
   { id: "dmodel", name: "DeepSeek-V4-Pro", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.5, efforts: ["high", "max"], defaultEffort: "max", supportsDisable: true },
-  { id: "dfmodel", name: "DeepSeek-Flash", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ["high", "max", "low"], defaultEffort: "max", supportsDisable: true },
+  { id: "dfmodel", name: "DeepSeek-Flash", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ["high", "max", "low"], defaultEffort: "max", supportsDisable: true, promotion: { active: true, discountFactor: 0, beforePromotionPriceFactor: 0.1, until: "2026-10-24T16:00:00.000Z" } },
   { id: "mmodel", name: "MiniMax-M3", contextWindow: 1e6, supportsImage: true, supportsThinking: false, priceFactor: 0.2 }
 ];
 var QODER = {
@@ -37971,7 +37971,7 @@ var QODER_CN_FALLBACK_MODELS = [
   // ⚠️ CN 的 `is_reasoning` 为 false（国际版为 true），故不声明 supportsThinking。
   // 实测最大窗口：938,000 目标 → 服务端计入 **999,991** 通过（连续 3 次可复现），
   // 939,000 时越界（`Internal Server Error`）→ 真实上限≈1,000,000。填 1M。
-  { id: "dfmodel", name: "DeepSeek-Flash", contextWindow: 1e6, supportsImage: true, priceFactor: 0.1, efforts: ["high", "max", "low"], defaultEffort: "max", supportsDisable: true },
+  { id: "dfmodel", name: "DeepSeek-Flash", contextWindow: 1e6, supportsImage: true, priceFactor: 0.1, efforts: ["high", "max", "low"], defaultEffort: "max", supportsDisable: true, promotion: { active: true, discountFactor: 0, beforePromotionPriceFactor: 0.1, until: "2026-10-24T16:00:00.000Z" } },
   // ⚠️ `gmodel` / `gfmodel` / `kmodel*` 有档位但**无 `disabled` 分支** → 不能关闭。
   { id: "gmodel", name: "GLM-5.3", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ["high", "low", "max"], defaultEffort: "max" },
   { id: "gfmodel", name: "GLM-5.3-Flash", contextWindow: 1e6, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ["high", "max"], defaultEffort: "max" },
@@ -39052,6 +39052,14 @@ var QoderAdapter = class extends LlmAdapter4 {
   }
 };
 function promotionActiveNow2(promotion, now) {
+  // [xdpool-local] A promotion may be bounded by absolute dates, not only by a
+  // daily HH:MM window: "free until 10-25 00:00 (UTC+8)" has no daily slot, and
+  // without this the table could only ever say "permanently free" or nothing.
+  // Unparseable or absent values leave the previous behaviour untouched.
+  const from = Date.parse(promotion.from ?? "");
+  const until = Date.parse(promotion.until ?? "");
+  if (Number.isFinite(until) && now.getTime() >= until) return false;
+  if (Number.isFinite(from) && now.getTime() < from) return false;
   const { windowStart, windowEnd } = promotion;
   if (windowStart === void 0 || windowEnd === void 0) return promotion.active;
   const toMinutes = (hhmm) => {

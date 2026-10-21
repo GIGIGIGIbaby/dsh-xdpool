@@ -53,3 +53,44 @@ describe('the vendored catalogue cache expires', () => {
     expect(body).not.toContain('owner.remoteModels = void 0')
   })
 })
+
+/**
+ * qoder's prices come from a table baked into the bundle, not from the network.
+ *
+ * `QoderAdapter.listModels` maps `product.fallbackModels` through
+ * `qoderDisplayName()`, which renders `priceFactor` plus an optional static
+ * `promotion`. So a refresh cannot change a qoder price, and the promo schema only
+ * knew daily HH:MM windows — which cannot express "free until 10-25 00:00". Both
+ * were added here, bounded by a date so the row reverts on its own instead of
+ * needing a second edit when the promo ends.
+ */
+describe('qoder promotions can end on a date', () => {
+  it('the window check honours from/until', () => {
+    const at = pack.indexOf('function promotionActiveNow2(promotion, now)')
+    expect(at).toBeGreaterThan(-1)
+    const body = pack.slice(at, at + 700)
+    expect(body).toContain('Date.parse(promotion.until ?? "")')
+    expect(body).toContain('Date.parse(promotion.from ?? "")')
+    expect(body).toContain('now.getTime() >= until')
+  })
+
+  it('both qoder tables carry the running DeepSeek promo with its end date', () => {
+    // International and CN each have their own table; a fix in only one leaves the
+    // other channel showing the old price.
+    const promos = pack.match(/id: "dfmodel"[^\n]*until: "([^"]+)"/gu) ?? []
+    expect(promos).toHaveLength(2)
+    for (const line of promos) {
+      expect(line).toContain('discountFactor: 0')
+      expect(line).toContain('beforePromotionPriceFactor: 0.1')
+      expect(line).toContain('until: "2026-10-24T16:00:00.000Z"')
+    }
+  })
+
+  it('a zero factor renders as an arrow to zero, not as free forever', () => {
+    // `priceFactor === 0` prints 免费 (a permanent fact); a promo must keep the old
+    // price visible and show where it lands, because it will come back.
+    const at = pack.indexOf('function qoderDisplayName(model, now =')
+    const body = pack.slice(at, at + 700)
+    expect(body).toContain('x${before}\\u2192x${effective}')
+  })
+})
